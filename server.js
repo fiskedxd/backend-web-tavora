@@ -182,6 +182,28 @@ app.get('/api/files/music/:filename', async (req, res) => {
   }
 });
 
+// POST /api/social/users/:userId/unblock
+app.post('/api/social/users/:userId/unblock', authMiddleware, async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user._id);
+    const targetUser = await User.findById(req.params.userId);
+    
+    if (!currentUser || !targetUser) {
+      return res.status(404).json({ message: 'Utilisateur non trouvé' });
+    }
+    
+    // Retirer l'utilisateur de la liste des bloqués
+    currentUser.blockedUsers = currentUser.blockedUsers.filter(
+      id => String(id) !== String(req.params.userId)
+    );
+    await currentUser.save();
+    
+    res.json({ message: 'Utilisateur débloqué' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 const connectDB = async () => {
   if (!MONGO_URI) {
     console.error('MONGO_URI is not configured. Database features are unavailable.');
