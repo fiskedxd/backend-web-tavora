@@ -34,6 +34,7 @@ app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use('/api/auth', authRoutes);
+app.use('/auth', authRoutes);
 app.use('/api/social', socialRoutes);
 app.use('/api/music', musicRoutes);
 app.use('/api/uploads', uploadRoutes);
@@ -179,28 +180,6 @@ app.get('/api/files/music/:filename', async (req, res) => {
   } catch (err) {
     console.error('Erreur:', err);
     res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-// POST /api/social/users/:userId/unblock
-app.post('/api/social/users/:userId/unblock', authMiddleware, async (req, res) => {
-  try {
-    const currentUser = await User.findById(req.user._id);
-    const targetUser = await User.findById(req.params.userId);
-    
-    if (!currentUser || !targetUser) {
-      return res.status(404).json({ message: 'Utilisateur non trouvé' });
-    }
-    
-    // Retirer l'utilisateur de la liste des bloqués
-    currentUser.blockedUsers = currentUser.blockedUsers.filter(
-      id => String(id) !== String(req.params.userId)
-    );
-    await currentUser.save();
-    
-    res.json({ message: 'Utilisateur débloqué' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
   }
 });
 

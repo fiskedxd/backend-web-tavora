@@ -14,6 +14,20 @@ const userSchema = new mongoose.Schema(
     status: { type: String, default: 'En ligne' },
     customStatus: { type: String, default: '', maxlength: 128 },
     customStatusExpiresAt: { type: Date, default: null },
+    
+    // ===== NOUVEAUX CHAMPS =====
+    avatarDecoration: { 
+      type: String, 
+      default: null,
+      trim: true,
+    },
+    nameplate: { 
+      type: String, 
+      default: 'none',
+      trim: true,
+    },
+    // ===== FIN NOUVEAUX CHAMPS =====
+    
     privacy: {
       friendRequests: { type: String, enum: ['everyone', 'friendsOfFriends', 'nobody'], default: 'everyone' },
       directMessages: { type: String, enum: ['everyone', 'friends', 'nobody'], default: 'everyone' },
@@ -44,16 +58,20 @@ const userSchema = new mongoose.Schema(
     },
     friends: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', default: [] }],
     blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', default: [] }],
+    blockedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', default: [] }],
     readReceipts: { type: mongoose.Schema.Types.Mixed, default: {} },
     incomingFriendRequests: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', default: [] }],
     outgoingFriendRequests: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', default: [] }],
     activity: { type: mongoose.Schema.Types.Mixed, default: null },
     tokenVersion: { type: Number, default: 1 },
     tokenSeed: { type: String, default: '' },
-      badges: [{ type: String, trim: true, default: [] }],
-      isOfficial: { type: Boolean, default: false, index: true },
-      systemPermissions: [{ type: String, trim: true, default: [] }],
-      isSuspect: { type: Boolean, default: false, index: true },
+    badges: [{ type: String, trim: true, default: [] }],
+    isOfficial: { type: Boolean, default: false, index: true },
+    systemPermissions: [{ type: String, trim: true, default: [] }],
+    isSuspect: { type: Boolean, default: false, index: true },
+    spotifyToken: { type: String, default: null },
+    spotifyRefreshToken: { type: String, default: null },
+    spotifyTokenExpiresAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
   },

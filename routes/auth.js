@@ -4,10 +4,17 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const User = require('../models/User');
+const Server = require('../models/Server');
 const { ensureUserBadgesAndOfficialFriend } = require('../services/officialAccount');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
+
+// Spotify constants
+const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID || 'ce04ed229b4a4731baae7a3d3f334994';
+const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET || '144117687cfc4467a49a2e2293be9c11';
+const SPOTIFY_REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || 'https://tavora-xi.vercel.app/auth/spotify/callback';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://backend-web-tavora.fly.dev';
 
 const memoryUsers = [];
 
@@ -116,6 +123,19 @@ router.post('/register', async (req, res) => {
       updatedAt: new Date(),
     });
     await ensureUserBadgesAndOfficialFriend(user);
+
+    // Ajouter le nouvel utilisateur au serveur principal si ce n'est pas le compte officiel
+    if (!user.isOfficial && mongoose.connection.readyState === 1) {
+      try {
+        const mainServer = await Server.findById('6a92e66c940745da8a000cc6');
+        if (mainServer && !mainServer.members.some((memberId) => String(memberId) === String(user._id))) {
+          mainServer.members.push(user._id);
+          await mainServer.save();
+        }
+      } catch (error) {
+        console.error('Erreur lors de l\'ajout au serveur principal:', error);
+      }
+    }
 
     const token = buildAccountToken(user);
 
@@ -256,6 +276,105 @@ router.patch('/email', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Impossible de modifier l’adresse e-mail.' });
+  }
+});
+
+// Spotify Auth Routes
+router.get('/spotify/login', (req, res) => {
+  const scopes = 'user-read-currently-playing user-read-playback-state';
+  const redirectUrl = `https://accounts.spotify.com/authorize?response_type=code&client_id=${SPOTIFY_CLIENT_ID}&scope=${encodeURIComponent(scopes)}&redirect_uri=${encodeURIComponent(SPOTIFY_REDIRECT_URI)}&state=${crypto.randomBytes(16).toString('hex')}`;
+  res.json({ url: redirectUrl });
+});
+
+router.post('/spotify/callback', async (req, res) => {
+  try {
+    const { code, userId } = req.body;
+    if (!code || !userId) return res.status(400).json({ message: 'Code et userId requis.' });
+
+    // Échange du code pour un token Spotify
+    const tokenResponse = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: SPOTIFY_REDIRECT_URI,
+        client_id: SPOTIFY_CLIENT_ID,
+        client_secret: SPOTIFY_CLIENT_SECRET,
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+    if (!tokenData.access_token) return res.status(400).json({ message: 'Impossible de récupérer le token Spotify.' });
+
+    // Sauvegarde du token Spotify dans la BD
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: 'Utilisateur non trouvé.' });
+
+    user.spotifyToken = tokenData.access_token;
+    user.spotifyRefreshToken = tokenData.refresh_token;
+    user.spotifyTokenExpiresAt = new Date(Date.now() + (tokenData.expires_in || 3600) * 1000);
+    await user.save();
+
+    res.json({ success: true, message: 'Spotify connecté avec succès!' });
+  } catch (error) {
+    console.error('Spotify callback error:', error);
+    res.status(500).json({ message: 'Erreur lors de la connexion Spotify.' });
+  }
+});
+
+router.get('/spotify/activity/:userId', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user || !user.spotifyToken) return res.json({ activity: null });
+
+    // Rafraîchir le token si expiré
+    if (user.spotifyTokenExpiresAt && new Date() >= user.spotifyTokenExpiresAt) {
+      const refreshResponse = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: user.spotifyRefreshToken,
+          client_id: SPOTIFY_CLIENT_ID,
+          client_secret: SPOTIFY_CLIENT_SECRET,
+        }),
+      });
+
+      const refreshData = await refreshResponse.json();
+      if (refreshData.access_token) {
+        user.spotifyToken = refreshData.access_token;
+        user.spotifyTokenExpiresAt = new Date(Date.now() + (refreshData.expires_in || 3600) * 1000);
+        await user.save();
+      }
+    }
+
+    // Récupérer la musique en cours
+    const currentResponse = await fetch('https://api.spotify.com/v1/me/player/currently-playing', {
+      headers: { 'Authorization': `Bearer ${user.spotifyToken}` },
+    });
+
+    if (!currentResponse.ok) return res.json({ activity: null });
+
+    const currentData = await currentResponse.json();
+    if (!currentData.item) return res.json({ activity: null });
+
+    const track = currentData.item;
+    res.json({
+      activity: {
+        type: 'spotify',
+        track: track.name,
+        artist: track.artists[0]?.name || 'Artiste inconnu',
+        imageUrl: track.album?.images?.[0]?.url || '',
+        progress: currentData.progress_ms || 0,
+        duration: track.duration_ms || 0,
+        isPlaying: currentData.is_playing || false,
+        spotifyUrl: track.external_urls?.spotify || '',
+      },
+    });
+  } catch (error) {
+    console.error('Spotify activity error:', error);
+    res.status(500).json({ message: 'Erreur lors de la récupération de l\'activité Spotify.' });
   }
 });
 

@@ -10,6 +10,48 @@ const Announcement = require('../models/Announcement');
 const Report = require('../models/Report');
 const { BADGES, OFFICIAL_AVATAR_URL, OFFICIAL_USERNAME, ensureOfficialAccount, ensureUserBadgesAndOfficialFriend, serializeBadges } = require('../services/officialAccount');
 
+const authMiddleware = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const rawToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+    const token = rawToken.trim();
+
+    if (!token) {
+      return res.status(401).json({ message: 'Non autorisé.' });
+    }
+
+    // Décoder le token pour récupérer l'userId
+    try {
+      const decodedPayload = Buffer.from(token, 'base64').toString('utf8');
+      const parts = decodedPayload.split('.');
+      const encodedUserId = parts[0];
+
+      if (!encodedUserId) {
+        return res.status(401).json({ message: 'Token invalide.' });
+      }
+
+      const userId = Buffer.from(encodedUserId, 'base64').toString('utf8');
+      if (!userId) {
+        return res.status(401).json({ message: 'Token invalide.' });
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(401).json({ message: 'Utilisateur non trouvé.' });
+      }
+
+      req.user = user;
+      next();
+    } catch (error) {
+      console.error('Auth middleware error:', error.message);
+      return res.status(401).json({ message: 'Token invalide.' });
+    }
+  } catch (error) {
+    console.error('Auth middleware error:', error.message);
+    return res.status(401).json({ message: 'Token invalide.' });
+  }
+};
+
 const requireOfficialPermission = async (req, permission) => {
   const user = await getUserFromAuth(req);
   if (!user) return { user: null, error: 'Non autorisé.' };
@@ -71,11 +113,16 @@ const serializeUserProfile = (user) => ({
   status: user.status || 'En ligne',
   customStatus: user.customStatus || '',
   customStatusExpiresAt: user.customStatusExpiresAt || null,
+  avatarDecoration: user.avatarDecoration || null,
+  nameplate: user.nameplate || 'none',
   privacy: user.privacy || undefined,
   notifications: user.notifications || undefined,
   appearance: user.appearance || 'dark',
   accessibility: user.accessibility || undefined,
   voiceVideo: user.voiceVideo || undefined,
+  blockedUsers: (user.blockedUsers || []).map((id) => String(id)),
+  blockedBy: (user.blockedBy || []).map((id) => String(id)),
+  friends: (user.friends || []).map((id) => String(id)),
   activity: null,
   badges: serializeBadges(user),
   isOfficial: Boolean(user.isOfficial),
@@ -92,6 +139,8 @@ const serializeFriendSummary = (user) => ({
   bio: user.bio || '',
   status: user.status || 'En ligne',
   customStatus: user.customStatus || '',
+  avatarDecoration: user.avatarDecoration || null, // AJOUTE
+  nameplate: user.nameplate || 'none', // AJOUTE
   activity: null,
   badges: serializeBadges(user),
   isOfficial: Boolean(user.isOfficial),
@@ -173,6 +222,7 @@ router.get('/me', async (req, res) => {
         accent: server.accent,
         avatarUrl: server.avatarUrl || '',
         bannerUrl: server.bannerUrl || '',
+        memberCount: Array.isArray(server.members) ? server.members.length : 0,
         structure: getStructure(server),
       })),
       friends: friends.map(serializeFriendSummary),
@@ -353,7 +403,7 @@ router.post('/servers/:serverId/invite', async (req, res) => {
     const durations = { '5m': 5 * 60 * 1000, '10m': 10 * 60 * 1000, '30m': 30 * 60 * 1000, '1h': 60 * 60 * 1000, '8h': 8 * 60 * 60 * 1000, never: null };
     const expiresAt = durations[duration] ? Date.now() + durations[duration] : null;
     const inviteId = server._id.toString();
-    const suffix = customCode ? `:${encodeURIComponent(customCode)}` : '';
+    const suffix = customCode ? `:${customCode}` : '';
     const link = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/invite/${inviteId}${suffix}`;
 
     res.json({
@@ -656,7 +706,7 @@ router.get('/servers/:serverId/members', async (req, res) => {
     const normalizedServerId = normalizeServerId(req.params.serverId);
     if (!normalizedServerId) return res.status(400).json({ message: 'Identifiant du serveur invalide.' });
 
-    const server = await Server.findById(normalizedServerId).populate('members', '_id username displayName avatarUrl bannerUrl bio status customStatus activity badges isOfficial').lean();
+    const server = await Server.findById(normalizedServerId).populate('members', '_id username displayName avatarUrl avatarDecoration nameplate bannerUrl bio status customStatus activity badges isOfficial').lean(); // AJOUTE avatarDecoration et nameplate
     if (!server) return res.status(404).json({ message: 'Serveur introuvable.' });
 
     await ensureEveryoneRole(server._id);
@@ -675,6 +725,8 @@ router.get('/servers/:serverId/members', async (req, res) => {
         username: member.username,
         displayName: member.displayName,
         avatarUrl: member.avatarUrl || '',
+        avatarDecoration: member.avatarDecoration || null, // AJOUTE
+        nameplate: member.nameplate || 'none', // AJOUTE
         bannerUrl: member.bannerUrl || '',
         bio: member.bio || '',
         status: member.status || 'En ligne',
@@ -704,7 +756,7 @@ router.get('/servers/:serverId/messages/:channelId', async (req, res) => {
     const { serverId, channelId } = req.params;
     const server = await Server.findById(serverId);
     if (!server || !(server.members || []).some((id) => String(id) === String(user._id)) || !(await requireServerPermission(server, user._id, 'VIEW_CHANNELS'))) return res.status(403).json({ message: 'Vous ne pouvez pas voir ce salon.' });
-    const messages = await Message.find({ serverId, channelId }).sort({ createdAt: -1 }).limit(200).populate('authorId', '_id username displayName avatarUrl bannerUrl bio status customStatus badges isOfficial').lean();
+    const messages = await Message.find({ serverId, channelId }).sort({ createdAt: -1 }).limit(200).populate('authorId', '_id username displayName avatarUrl avatarDecoration nameplate bannerUrl bio status customStatus badges isOfficial').lean(); // AJOUTE avatarDecoration et nameplate
     const enrichedMessages = messages.reverse().map((message) => {
       const author = message.authorId && typeof message.authorId === 'object' ? message.authorId : null;
       return {
@@ -713,6 +765,8 @@ router.get('/servers/:serverId/messages/:channelId', async (req, res) => {
         authorDisplayName: message.authorDisplayName || author?.displayName || author?.username || 'Utilisateur',
         authorUsername: message.authorUsername || author?.username || 'user',
         authorAvatarUrl: message.authorAvatarUrl || author?.avatarUrl || '',
+        authorAvatarDecoration: author?.avatarDecoration || null, // AJOUTE
+        authorNameplate: author?.nameplate || 'none', // AJOUTE
         authorBannerUrl: author?.bannerUrl || '',
         authorBio: author?.bio || '',
         authorActivity: null,
@@ -949,34 +1003,159 @@ router.delete('/moderation/users/:userId/suspect', async (req, res) => {
   res.json({ status: 'closed' });
 });
 
-router.post('/users/:userId/block', async (req, res) => {
+// ==================== BLOCAGE / DÉBLOCAGE ====================
+
+// Bloquer un utilisateur
+router.post('/users/:userId/block', authMiddleware, async (req, res) => {
   try {
-    const user = await getUserFromAuth(req);
-    if (!user) return res.status(401).json({ message: 'Non autorisé.' });
-    if (String(user._id) === String(req.params.userId)) return res.status(400).json({ message: 'Impossible de se bloquer soi-même.' });
-    const target = await User.findById(req.params.userId);
-    if (!target) return res.status(404).json({ message: 'Utilisateur introuvable.' });
-    if (target.isOfficial) return res.status(403).json({ message: 'Le compte officiel Tevora ne peut pas être bloqué.' });
-    await Promise.all([
-      User.findByIdAndUpdate(user._id, { $addToSet: { blockedUsers: target._id }, $pull: { friends: target._id, outgoingFriendRequests: target._id, incomingFriendRequests: target._id } }),
-      User.findByIdAndUpdate(target._id, { $pull: { friends: user._id, outgoingFriendRequests: user._id, incomingFriendRequests: user._id } }),
-    ]);
-    res.json({ message: 'Utilisateur bloqué.', userId: target._id });
+    const currentUser = await User.findById(req.user._id);
+    const targetUser = await User.findById(req.params.userId);
+    
+    if (!currentUser || !targetUser) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'Utilisateur non trouvé' 
+      });
+    }
+    
+    if (String(currentUser._id) === String(targetUser._id)) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Vous ne pouvez pas vous bloquer vous-même' 
+      });
+    }
+    
+    // Ajouter à la liste des bloqués de currentUser
+    if (!currentUser.blockedUsers.some(id => String(id) === String(targetUser._id))) {
+      currentUser.blockedUsers.push(targetUser._id);
+    }
+    await currentUser.save();
+    
+    // Ajouter currentUser à blockedBy de targetUser
+    if (!targetUser.blockedBy) targetUser.blockedBy = [];
+    if (!targetUser.blockedBy.some(id => String(id) === String(currentUser._id))) {
+      targetUser.blockedBy.push(currentUser._id);
+    }
+    await targetUser.save();
+    
+    // Supprimer des amis si c'en était
+    currentUser.friends = currentUser.friends.filter(id => String(id) !== String(targetUser._id));
+    targetUser.friends = targetUser.friends.filter(id => String(id) !== String(currentUser._id));
+    await currentUser.save();
+    await targetUser.save();
+    
+    res.json({ 
+      success: true,
+      message: 'Utilisateur bloqué',
+      user: {
+        id: targetUser._id,
+        username: targetUser.username,
+        displayName: targetUser.displayName,
+        avatarUrl: targetUser.avatarUrl,
+        isBlocked: true,
+        isFriend: false
+      }
+    });
   } catch (error) {
-    res.status(500).json({ message: 'Impossible de bloquer cet utilisateur.' });
+    console.error('Erreur blocage:', error);
+    res.status(500).json({ 
+      success: false,
+      message: error.message || 'Impossible de bloquer l\'utilisateur' 
+    });
   }
 });
 
-router.post('/users/:userId/unblock', async (req, res) => {
+// Débloquer un utilisateur
+router.post('/users/:userId/unblock', authMiddleware, async (req, res) => {
   try {
-    const user = await getUserFromAuth(req);
-    if (!user) return res.status(401).json({ message: 'Non autorisé.' });
-    const target = await User.findById(req.params.userId).select('isOfficial');
-    if (target?.isOfficial) return res.status(403).json({ message: 'Le compte officiel Tevora ne peut pas être bloqué.' });
-    await User.findByIdAndUpdate(user._id, { $pull: { blockedUsers: req.params.userId } });
-    res.json({ message: 'Utilisateur débloqué.', userId: req.params.userId });
+    const currentUser = await User.findById(req.user._id);
+    const targetUser = await User.findById(req.params.userId);
+    
+    if (!currentUser || !targetUser) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'Utilisateur non trouvé' 
+      });
+    }
+    
+    // Vérifier si l'utilisateur est vraiment bloqué
+    const isBlocked = currentUser.blockedUsers.some(
+      id => String(id) === String(req.params.userId)
+    );
+    
+    if (!isBlocked) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Cet utilisateur n\'est pas bloqué' 
+      });
+    }
+    
+    // Retirer de la liste des bloqués de currentUser
+    currentUser.blockedUsers = currentUser.blockedUsers.filter(
+      id => String(id) !== String(req.params.userId)
+    );
+    await currentUser.save();
+    
+    // Retirer currentUser de la liste blockedBy de targetUser
+    targetUser.blockedBy = targetUser.blockedBy || [];
+    targetUser.blockedBy = targetUser.blockedBy.filter(
+      id => String(id) !== String(req.user._id)
+    );
+    await targetUser.save();
+    
+    res.json({ 
+      success: true,
+      message: 'Utilisateur débloqué',
+      user: {
+        id: targetUser._id,
+        username: targetUser.username,
+        displayName: targetUser.displayName,
+        avatarUrl: targetUser.avatarUrl,
+        isBlocked: false
+      }
+    });
   } catch (error) {
-    res.status(500).json({ message: 'Impossible de débloquer cet utilisateur.' });
+    console.error('Erreur déblocage:', error);
+    res.status(500).json({ 
+      success: false,
+      message: error.message || 'Impossible de débloquer l\'utilisateur' 
+    });
+  }
+});
+
+// Vérifier si un utilisateur est bloqué
+router.get('/users/:userId/block-status', authMiddleware, async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user._id);
+    const targetUser = await User.findById(req.params.userId);
+    
+    if (!currentUser || !targetUser) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'Utilisateur non trouvé' 
+      });
+    }
+    
+    const isBlocked = currentUser.blockedUsers.some(
+      id => String(id) === String(req.params.userId)
+    );
+    
+    const isBlockedBy = targetUser.blockedBy && targetUser.blockedBy.some(
+      id => String(id) === String(req.user._id)
+    );
+    
+    res.json({ 
+      success: true,
+      isBlocked: isBlocked || isBlockedBy,
+      isBlockedByMe: isBlocked,
+      isBlockedByThem: isBlockedBy
+    });
+  } catch (error) {
+    console.error('Erreur vérification blocage:', error);
+    res.status(500).json({ 
+      success: false,
+      message: error.message || 'Impossible de vérifier le statut de blocage' 
+    });
   }
 });
 
@@ -1111,7 +1290,7 @@ router.get('/messages/private/:userId', async (req, res) => {
     if ((authUser.blockedUsers || []).some((id) => String(id) === String(targetUser._id)) || (targetUser.blockedUsers || []).some((id) => String(id) === String(authUser._id))) return res.status(403).json({ message: 'Cette conversation est bloquée.' });
 
     const conversationId = buildConversationId(authUser._id, targetUser._id);
-    const privateMessages = await Message.find({ isPrivate: true, conversationId }).sort({ createdAt: -1 }).limit(200).populate('authorId', '_id username displayName avatarUrl bannerUrl bio status customStatus badges isOfficial').lean();
+    const privateMessages = await Message.find({ isPrivate: true, conversationId }).sort({ createdAt: -1 }).limit(200).populate('authorId', '_id username displayName avatarUrl avatarDecoration nameplate bannerUrl bio status customStatus badges isOfficial').lean(); // AJOUTE avatarDecoration et nameplate
     const enrichedMessages = privateMessages.reverse().map((message) => {
       const author = message.authorId && typeof message.authorId === 'object' ? message.authorId : null;
       return {
@@ -1120,6 +1299,8 @@ router.get('/messages/private/:userId', async (req, res) => {
         authorDisplayName: message.authorDisplayName || author?.displayName || author?.username || 'Utilisateur',
         authorUsername: message.authorUsername || author?.username || 'user',
         authorAvatarUrl: message.authorAvatarUrl || author?.avatarUrl || '',
+        authorAvatarDecoration: author?.avatarDecoration || null, // AJOUTE
+        authorNameplate: author?.nameplate || 'none', // AJOUTE
         authorBannerUrl: author?.bannerUrl || '',
         authorBio: author?.bio || '',
         authorActivity: null,
@@ -1326,7 +1507,7 @@ router.put('/profile', async (req, res) => {
     if (!authUser) return res.status(401).json({ message: 'Non autorisé.' });
     if (authUser.isOfficial) return res.status(403).json({ message: 'L’identité du compte officiel ne peut pas être modifiée.' });
 
-    const { displayName, username, bio, avatarUrl, bannerUrl, activity, status, customStatus, customStatusExpiresAt } = req.body;
+    const { displayName, username, bio, avatarUrl, bannerUrl, activity, status, customStatus, customStatusExpiresAt, avatarDecoration, nameplate } = req.body; // AJOUTE avatarDecoration et nameplate
     const updates = {};
 
     if (displayName !== undefined) updates.displayName = displayName.trim();
@@ -1338,6 +1519,8 @@ router.put('/profile', async (req, res) => {
     if (status !== undefined) updates.status = status;
     if (customStatus !== undefined) updates.customStatus = String(customStatus).trim().slice(0, 128);
     if (customStatusExpiresAt !== undefined) updates.customStatusExpiresAt = customStatusExpiresAt || null;
+    if (avatarDecoration !== undefined) updates.avatarDecoration = avatarDecoration; // AJOUTE
+    if (nameplate !== undefined) updates.nameplate = nameplate; // AJOUTE
 
     const updatedUser = await User.findByIdAndUpdate(authUser._id, updates, { new: true }).lean();
     if (!updatedUser) return res.status(404).json({ message: 'Profil introuvable.' });
@@ -1451,6 +1634,49 @@ router.get('/official/actus', async (req, res) => {
   if (access.error) return res.status(access.user ? 403 : 401).json({ message: access.error });
   const announcements = await Announcement.find().sort({ createdAt: -1 }).limit(100).lean();
   res.json({ announcements });
+});
+
+// Route admin pour synchroniser les utilisateurs existants au serveur principal
+router.post('/admin/sync-users-to-main-server', authMiddleware, async (req, res) => {
+  try {
+    const user = await getUserFromAuth(req);
+    if (!user) return res.status(401).json({ message: 'Non autorisé.' });
+    
+    // Vérifier que c'est un compte officiel ou avec permissions admin
+    if (!user.isOfficial && !(user.systemPermissions || []).includes('OFFICIAL_MESSAGING')) {
+      return res.status(403).json({ message: 'Seul un administrateur peut exécuter cette action.' });
+    }
+
+    const MAIN_SERVER_ID = '6a92e66c940745da8a000cc6';
+    const mainServer = await Server.findById(MAIN_SERVER_ID);
+    
+    if (!mainServer) {
+      return res.status(404).json({ message: 'Serveur principal introuvable.' });
+    }
+
+    // Récupérer tous les utilisateurs sauf le compte officiel
+    const allUsers = await User.find({ isOfficial: { $ne: true } }).select('_id').lean();
+    
+    let addedCount = 0;
+    for (const userData of allUsers) {
+      if (!mainServer.members.some((memberId) => String(memberId) === String(userData._id))) {
+        mainServer.members.push(userData._id);
+        addedCount++;
+      }
+    }
+
+    await mainServer.save();
+
+    res.json({ 
+      success: true,
+      message: `${addedCount} utilisateur(s) ajouté(s) au serveur principal.`,
+      addedCount,
+      totalMembers: mainServer.members.length
+    });
+  } catch (error) {
+    console.error('Erreur sync users:', error);
+    res.status(500).json({ message: 'Impossible de synchroniser les utilisateurs.' });
+  }
 });
 
 module.exports = router;
